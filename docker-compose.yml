@@ -1,0 +1,183 @@
+version: '3.8'
+
+services:
+  # CMS Database
+  cms-postgres:
+    image: postgres:15-alpine
+    container_name: cms_postgres_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cms_db
+      POSTGRES_USER: cms_user
+      POSTGRES_PASSWORD: cms_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - cms_postgres_data:/var/lib/postgresql/data
+      - ./sql/cms-init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - cms_network
+
+  # Discovery Database
+  discovery-postgres:
+    image: postgres:15-alpine
+    container_name: discovery_postgres_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: discovery_db
+      POSTGRES_USER: discovery_user
+      POSTGRES_PASSWORD: discovery_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - discovery_postgres_data:/var/lib/postgresql/data
+      - ./sql/discovery-init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - cms_network
+
+  # Apache Kafka - Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - cms_network
+
+  # Apache Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_DELETE_TOPIC_ENABLE: 'true'
+    networks:
+      - cms_network
+
+  # Kafka UI for monitoring and management
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - cms_network
+
+  # CMS Application
+  cms:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cms_app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # CMS Database
+      CMS_DB_HOST: cms-postgres
+      CMS_DB_PORT: 5432
+      CMS_DB_NAME: cms_db
+      CMS_DB_USERNAME: cms_user
+      CMS_DB_PASSWORD: cms_password
+      # Kafka Configuration
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_CLIENT_ID_CMS: cms-service
+      KAFKA_GROUP_ID_CMS: cms-group
+      # JWT Configuration
+      JWT_SECRET: your-super-secret-jwt-key-for-production
+      JWT_EXPIRES_IN: 24h
+      # File Upload Configuration
+      UPLOAD_PATH: /app/uploads
+      MAX_FILE_SIZE: 104857600
+    ports:
+      - "3000:3000"
+    depends_on:
+      - cms-postgres
+      - kafka
+    volumes:
+      - upload_data:/app/uploads
+    networks:
+      - cms_network
+
+  # Discovery Application
+  discovery:
+    build:
+      context: .
+      dockerfile: Dockerfile.discovery
+    container_name: discovery_app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DISCOVERY_PORT: 3001
+      # Discovery Database
+      DISCOVERY_DB_HOST: discovery-postgres
+      DISCOVERY_DB_PORT: 5432
+      DISCOVERY_DB_NAME: discovery_db
+      DISCOVERY_DB_USERNAME: discovery_user
+      DISCOVERY_DB_PASSWORD: discovery_password
+      # Kafka Configuration
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_CLIENT_ID_DISCOVERY: discovery-service
+      KAFKA_GROUP_ID_DISCOVERY: discovery-group
+      # Cache Configuration
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_TTL: 3600
+      # CORS Configuration
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:8080
+    ports:
+      - "3001:3001"
+    depends_on:
+      - discovery-postgres
+      - kafka
+      - redis
+    networks:
+      - cms_network
+
+  # Redis for Discovery caching
+  redis:
+    image: redis:7-alpine
+    container_name: cms_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - cms_network
+
+volumes:
+  cms_postgres_data:
+  discovery_postgres_data:
+  redis_data:
+  upload_data:
+
+networks:
+  cms_network:
+    driver: bridge
